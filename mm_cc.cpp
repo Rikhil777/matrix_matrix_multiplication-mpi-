@@ -1,118 +1,148 @@
-#include <mpi.h>
-#include <iostream>
-#include <vector>
-#include <cstdlib>
-#include <algorithm>
-#include <iomanip>
+#include <stdlib.h>
+#include <stdio.h>
+#include "mpi.h"
+#include <time.h>
+#include <sys/time.h>
 
-// Print matrix
-void print_matrix(const std::vector<double>& mat, int rows, int cols, const std::string& name) {
-    std::cout << name << " = " << std::endl;
-    for (int i = 0; i < rows; i++) {
-        for (int j = 0; j < cols; j++) {
-            std::cout << std::setw(4) << mat[i * cols + j] << " ";
-        }
-        std::cout << std::endl;
-    }
-    std::cout << std::endl;
+// Number of rows and columns in a matrix
+#define N 1000
+
+MPI_Status status;
+
+// Matrix holders
+double matrix_a[N][N], matrix_b[N][N], matrix_c[N][N];
+
+int main(int argc, char **argv)
+{
+int processCount, processId, slaveTaskCount, source, dest, rows, offset;
+
+// For timing
+struct timeval start, end;
+
+MPI_Init(&argc, &argv);
+MPI_Comm_rank(MPI_COMM_WORLD, &processId);
+MPI_Comm_size(MPI_COMM_WORLD, &processCount);
+
+slaveTaskCount = processCount - 1;
+
+// Validate number of slave processes
+if (slaveTaskCount <= 0) {
+if (processId == 0) {
+printf("Error: At least 2 processes are required (1 master + at least 1 slave).\n");
+}
+MPI_Finalize();
+return 1;
 }
 
-// Multiply rows of A with B and store in C
-void multiply_rows(const std::vector<double>& A, const std::vector<double>& B,
-                   std::vector<double>& C, int local_rows, int N, int K) {
-    for (int i = 0; i < local_rows; ++i) {
-        for (int j = 0; j < N; ++j) {
-            double sum = 0.0;
-            for (int k = 0; k < K; ++k) {
-                sum += A[i*K + k] * B[k*N + j];
-            }
-            C[i*N + j] = sum;
-        }
-    }
+if (N % slaveTaskCount != 0) {
+if (processId == 0) {
+printf("Error: Number of slave processes (%d) must exactly divide matrix size (%d).\n", slaveTaskCount, N);
+printf("Please run with np = %d (1 master + %d slaves).\n", slaveTaskCount + 1, slaveTaskCount);
+}
+MPI_Finalize();
+return 1;
 }
 
-int main(int argc, char** argv) {
-    MPI_Init(&argc, &argv);
+rows = N / slaveTaskCount;
 
-    int rank, size;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+// Root (Master) process
+if (processId == 0) {
+srand(time(NULL));
 
-    int M = 8, K = 8, N = 8; // Example sizes
+// Fill matrices A and B with random numbers
+for (int i = 0; i < N; i++) {
+for (int j = 0; j < N; j++) {
+matrix_a[i][j] = rand() % 10;
+matrix_b[i][j] = rand() % 10;
+}
+}
 
-    std::vector<double> A, B, C;
-    if (rank == 0) {
-        // Initialize matrices
-        A.resize(M*K);
-        B.resize(K*N);
-        C.resize(M*N, 0.0);
-        for (int i = 0; i < M*K; ++i) A[i] = rand() % 10;
-        for (int i = 0; i < K*N; ++i) B[i] = rand() % 10;
+printf("\n\t\tMatrix - Matrix Multiplication using MPI\n");
 
-        std::cout << "Initial Matrices:" << std::endl;
-        print_matrix(A, M, K, "A");
-        print_matrix(B, K, N, "B");
-    }
+// Print Matrix A
+printf("\nMatrix A\n\n");
+for (int i = 0; i < N; i++) {
+for (int j = 0; j < N; j++) {
+printf("%.0f\t", matrix_a[i][j]);
+}
+printf("\n");
+}
 
-    // Broadcast B to all processes
-    if (B.size() != K*N) B.resize(K*N);
-    MPI_Bcast(B.data(), K*N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+// Print Matrix B
+printf("\nMatrix B\n\n");
+for (int i = 0; i < N; i++) {
+for (int j = 0; j < N; j++) {
+printf("%.0f\t", matrix_b[i][j]);
+}
+printf("\n");
+}
 
-    // Prepare to scatter rows of A
-    int rows_per_proc = M / size;
-    int extra = M % size;
-    std::vector<int> sendcounts(size), displs(size);
+offset = 0;
 
-    for (int i = 0; i < size; ++i) {
-        int start = i * rows_per_proc + std::min(i, extra);
-        int end = start + rows_per_proc + (i < extra ? 1 : 0);
-        sendcounts[i] = (end - start) * K;
-        displs[i] = start * K;
-    }
+// Start timing
+gettimeofday(&start, NULL);
 
-    int local_rows = sendcounts[rank] / K;
-    std::vector<double> local_A(sendcounts[rank]);
-    std::vector<double> local_C(local_rows * N, 0.0);
+// Send data to slave tasks
+for (dest = 1; dest <= slaveTaskCount; dest++) {
+MPI_Send(&offset, 1, MPI_INT, dest, 1, MPI_COMM_WORLD);
+MPI_Send(&rows, 1, MPI_INT, dest, 1, MPI_COMM_WORLD);
+MPI_Send(&matrix_a[offset][0], rows * N, MPI_DOUBLE, dest, 1, MPI_COMM_WORLD);
+MPI_Send(&matrix_b, N * N, MPI_DOUBLE, dest, 1, MPI_COMM_WORLD);
+offset += rows;
+}
 
-    // Scatter rows of A
-    MPI_Scatterv(A.data(), sendcounts.data(), displs.data(), MPI_DOUBLE,
-                 local_A.data(), sendcounts[rank], MPI_DOUBLE, 0, MPI_COMM_WORLD);
+// Receive results from slave tasks
+for (int i = 1; i <= slaveTaskCount; i++) {
+source = i;
+MPI_Recv(&offset, 1, MPI_INT, source, 2, MPI_COMM_WORLD, &status);
+MPI_Recv(&rows, 1, MPI_INT, source, 2, MPI_COMM_WORLD, &status);
+MPI_Recv(&matrix_c[offset][0], rows * N, MPI_DOUBLE, source, 2, MPI_COMM_WORLD, &status);
+}
 
-    // Start timing
-    MPI_Barrier(MPI_COMM_WORLD);
-    double start = MPI_Wtime();
+// End timing
+gettimeofday(&end, NULL);
 
-    // Compute local multiplication
-    multiply_rows(local_A, B, local_C, local_rows, N, K);
+// Calculate time in milliseconds
+double elapsed = (end.tv_sec - start.tv_sec) * 1000.0;
+elapsed += (end.tv_usec - start.tv_usec) / 1000.0;
 
-    // Prepare to gather results
-    std::vector<int> recvcounts(size), recvdispls(size);
-    for (int i = 0; i < size; ++i) {
-        int start = i * rows_per_proc + std::min(i, extra);
-        int end = start + rows_per_proc + (i < extra ? 1 : 0);
-        recvcounts[i] = (end - start) * N;
-        recvdispls[i] = start * N;
-    }
+// Print the result matrix
+printf("\nResult Matrix C = Matrix A * Matrix B:\n\n");
+for (int i = 0; i < N; i++) {
+for (int j = 0; j < N; j++)
+printf("%.0f\t", matrix_c[i][j]);
+printf("\n");
+}
 
-    if (rank == 0 && C.size() != M*N) C.resize(M*N);
+printf("\nTotal Execution Time: %.3f ms\n", elapsed);
+}
 
-    // Gather results into C
-    MPI_Gatherv(local_C.data(), local_rows*N, MPI_DOUBLE,
-                C.data(), recvcounts.data(), recvdispls.data(),
-                MPI_DOUBLE, 0, MPI_COMM_WORLD);
+// Slave Processes
+if (processId > 0) {
+source = 0;
 
-    // End timing
-    MPI_Barrier(MPI_COMM_WORLD);
-    double end = MPI_Wtime();
-    double elapsed = end - start;
+// Receive data from root process
+MPI_Recv(&offset, 1, MPI_INT, source, 1, MPI_COMM_WORLD, &status);
+MPI_Recv(&rows, 1, MPI_INT, source, 1, MPI_COMM_WORLD, &status);
+MPI_Recv(&matrix_a, rows * N, MPI_DOUBLE, source, 1, MPI_COMM_WORLD, &status);
+MPI_Recv(&matrix_b, N * N, MPI_DOUBLE, source, 1, MPI_COMM_WORLD, &status);
 
-    // Print results (root only)
-    if (rank == 0) {
-        print_matrix(C, M, N, "C");
-        std::cout << "Time taken for multiplication: "
-                  << elapsed << " seconds" << std::endl;
-    }
+// Perform matrix multiplication on assigned rows
+for (int k = 0; k < N; k++) {
+for (int i = 0; i < rows; i++) {
+matrix_c[i][k] = 0.0;
+for (int j = 0; j < N; j++) {
+matrix_c[i][k] += matrix_a[i][j] * matrix_b[j][k];
+}
+}
+}
 
-    MPI_Finalize();
-    return 0;
+// Send results back to root process
+MPI_Send(&offset, 1, MPI_INT, 0, 2, MPI_COMM_WORLD);
+MPI_Send(&rows, 1, MPI_INT, 0, 2, MPI_COMM_WORLD);
+MPI_Send(&matrix_c, rows * N, MPI_DOUBLE, 0, 2, MPI_COMM_WORLD);
+}
+
+MPI_Finalize();
+return 0;
 }
