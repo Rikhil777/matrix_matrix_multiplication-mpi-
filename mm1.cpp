@@ -3,6 +3,19 @@
 #include <vector>
 #include <cstdlib>
 #include <algorithm>
+#include <iomanip>
+
+// Print matrix
+void print_matrix(const std::vector<double>& mat, int rows, int cols, const std::string& name) {
+    std::cout << name << " = " << std::endl;
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            std::cout << std::setw(4) << mat[i * cols + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+    std::cout << std::endl;
+}
 
 // Multiply rows of A with B and store in C
 void multiply_rows(const std::vector<double>& A, const std::vector<double>& B, std::vector<double>& C,
@@ -35,9 +48,13 @@ int main(int argc, char** argv) {
         C.resize(M*N, 0.0);
         for (int i = 0; i < M*K; ++i) A[i] = rand() % 10;
         for (int i = 0; i < K*N; ++i) B[i] = rand() % 10;
+
+        std::cout << "Initial Matrices:" << std::endl;
+        print_matrix(A, M, K, "A");
+        print_matrix(B, K, N, "B");
     }
 
-    // Send B to all processes manually
+    // Broadcast B to all processes
     if (rank == 0) {
         for (int p = 1; p < size; ++p) {
             MPI_Send(B.data(), K*N, MPI_DOUBLE, p, 0, MPI_COMM_WORLD);
@@ -71,6 +88,9 @@ int main(int argc, char** argv) {
         MPI_Recv(local_A.data(), local_rows*K, MPI_DOUBLE, 0, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     }
 
+    // Start timer before multiplication
+    double start = MPI_Wtime();
+
     // Compute local multiplication
     multiply_rows(local_A, B, local_C, local_rows, N, K, 0, local_rows);
 
@@ -88,10 +108,13 @@ int main(int argc, char** argv) {
         MPI_Send(local_C.data(), local_rows*N, MPI_DOUBLE, 0, 2, MPI_COMM_WORLD);
     }
 
+    double end = MPI_Wtime();
+    double elapsed = end - start;
+
+    // Print result on rank 0
     if (rank == 0) {
-        std::cout << "Result matrix C (first 4 elements): ";
-        for (int i = 0; i < std::min(4, M*N); ++i) std::cout << C[i] << " ";
-        std::cout << std::endl;
+        print_matrix(C, M, N, "C");
+        std::cout << "Time taken for multiplication: " << elapsed << " seconds" << std::endl;
     }
 
     MPI_Finalize();
